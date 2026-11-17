@@ -45,6 +45,32 @@ CREATE INDEX IF NOT EXISTS migration_delta_month_seq
     ON migration_delta (month, seq);
 
 -- ============================================================================
+-- 观测交付（月度复核取数留存）
+-- ----------------------------------------------------------------------------
+-- 受理时在单个事务内把该月观测完整复制到独立快照表（同一已提交时点），
+-- 之后 CSV 只从快照表生成，永不再读 observations —— 不随后续更正变化，
+-- 也不妨碍采集写入与月迁移。文件完整落盘并登记一致后 status 才置 ready。
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS deliveries (
+    delivery_no     text        PRIMARY KEY,   -- 交付单号
+    month           date        NOT NULL,      -- UTC 月份首日
+    status          text        NOT NULL DEFAULT 'frozen'
+                    CHECK (status IN ('frozen','generating','ready','failed')),
+    snapshot_table  text        NOT NULL,      -- 固定快照表（受理时同事务创建）
+    row_count       bigint      NOT NULL DEFAULT 0,  -- 快照行数（受理时点固定）
+    generated_rows  bigint      NOT NULL DEFAULT 0,  -- 生成进度（已写 CSV 数据行）
+    csv_rows        bigint,                      -- CSV 数据行数（生成完成时登记）
+    csv_sha256      text,                        -- CSV 文件 SHA-256（hex）
+    csv_bytes       bigint,                      -- CSV 文件字节数
+    file_path       text,                        -- CSV 最终路径（原子 rename 后）
+    sleep_ms        integer     NOT NULL DEFAULT 0,  -- 每批生成延迟（慢生成演示）
+    frozen_at       timestamptz NOT NULL DEFAULT now(),  -- 快照固定时点
+    error           text,
+    updated_at      timestamptz NOT NULL DEFAULT now(),
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+
+-- ============================================================================
 -- 演示种子数据：最近 6 个自然月（UTC），8 个站点，每小时一条整数测值。
 -- 全部写入默认分区 —— 即"历史观测 initially 都在默认分区"。
 -- ============================================================================

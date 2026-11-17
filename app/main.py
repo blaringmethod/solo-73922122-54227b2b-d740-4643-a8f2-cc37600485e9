@@ -1,4 +1,4 @@
-"""FastAPI 入口：迁移控制、进度查询、父表查询、采集写入演示、一致性校验。"""
+"""FastAPI 入口：迁移控制、进度查询、父表查询、采集写入演示、一致性校验、观测交付。"""
 
 from __future__ import annotations
 
@@ -11,8 +11,15 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+import delivery
 import migrator
 from db import connect, ensure_meta_tables, log, logs_since
+from delivery import (
+    DeliveryNotFound,
+    MonthMismatch,
+    NotReady,
+    NotRetryable,
+)
 from migrator import (
     AlreadyDone,
     MigrationBusy,
@@ -22,7 +29,7 @@ from migrator import (
     start_migration,
 )
 
-app = FastAPI(title="观测数据月分区在线迁移")
+app = FastAPI(title="观测数据月分区在线迁移与观测交付")
 STATIC = Path(__file__).parent / "static"
 
 
@@ -30,6 +37,7 @@ STATIC = Path(__file__).parent / "static"
 def _startup():
     ensure_meta_tables()
     log("应用启动，元数据表就绪")
+    delivery.resume_incomplete()
 
 
 # --------------------------------------------------------------------- 页面
@@ -112,6 +120,7 @@ def api_state():
         ],
         "worker_month": current_worker_month(),
         "auto_writer": auto_writer_state(),
+        "deliveries_running": delivery.running_deliveries(),
     }
 
 
@@ -138,6 +147,76 @@ def api_migrate(req: MigrateReq):
         raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ----------------------------------------------------------------- 观测交付
+class DeliveryReq(BaseModel):
+    delivery_no: str
+    month: str
+    sleep_ms: int = Field(default=0, ge=0, le=10000)  # 每批生成延迟（慢生成演示）
+    fail_at: str | None = None  # 故障注入（演示/自测用）：generating
+
+
+@app.post("/api/deliveries")
+def api_delivery_submit(req: DeliveryReq):
+    """受理交付：同一已提交时点固定该月完整观测（同事务快照）后返回。
+
+    同号同月的并发提交/断连重试复用原快照；同号换月拒绝（409）。
+    """
+    try:
+        return delivery.submit_delivery(
+            req.delivery_no, req.month, req.sleep_ms, req.fail_at
+        )
+    except MonthMismatch as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/deliveries")
+def api_delivery_list():
+    return {"deliveries": delivery.list_deliveries(),
+            "running": delivery.running_deliveries()}
+
+
+@app.get("/api/deliveries/{no}")
+def api_delivery_get(no: str):
+    st = delivery.get_delivery(no)
+    if st is None:
+        raise HTTPException(status_code=404, detail=f"交付单号不存在: {no}")
+    return st
+
+
+@app.post("/api/deliveries/{no}/retry")
+def api_delivery_retry(no: str):
+    """失败/中断后重试：只用原固定快照，绝不重读现行观测。"""
+    try:
+        return delivery.retry_delivery(no)
+    except DeliveryNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except NotRetryable as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/deliveries/{no}/download")
+def api_delivery_download(no: str):
+    """文件完整持久化且登记（大小+SHA-256）一致才开放下载。"""
+    try:
+        path = delivery.verified_file(no)
+    except DeliveryNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except NotReady as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return FileResponse(
+        path,
+        media_type="text/csv",
+        filename=f"obs_delivery_{no}.csv",
+        headers={"X-Content-SHA256": delivery.get_delivery(no)["csv_sha256"]},
+    )
 
 
 # ------------------------------------------------------------------ 父表查询

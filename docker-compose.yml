@@ -20,11 +20,18 @@ services:
     build: ./app
     environment:
       DATABASE_URL: postgresql://envmon:envmon@db:5432/envmon
+      DELIVERY_DIR: /data/deliveries
+    volumes:
+      - deliveries:/data/deliveries
     depends_on:
       db:
         condition: service_healthy
+    # 交付"退出重启演示"：进程硬退出（os._exit，退出码非 0）后容器自动拉起，
+    # 启动时未完成的交付从原固定快照续跑，已完成交付字节不变。
+    restart: on-failure
     ports:
       - "8000:8000"
 
 volumes:
   pgdata:
+  deliveries:

@@ -37,5 +37,6 @@ print("db ready")
 EOF
 
 cd "$ROOT/app"
+DELIVERY_DIR=${DELIVERY_DIR:-/tmp/pg-runtime/deliveries} \
 DATABASE_URL="postgresql://envmon@127.0.0.1:$PGPORT/$DB" \
   exec "$PY" -m uvicorn main:app --host 0.0.0.0 --port "$APP_PORT"

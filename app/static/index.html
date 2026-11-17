@@ -124,6 +124,31 @@
     <div id="vResult" class="mono" style="font-size:13px;white-space:pre-wrap">—</div>
   </section>
 
+  <!-- 观测交付 -->
+  <section class="card wide">
+    <h2>⑥ 观测交付（月度复核取数留存 · 不随后续更正变化）</h2>
+    <div class="row">
+      <label>交付单号</label><input id="dNo" placeholder="如 DEL-2026-001" style="width:160px">
+      <label>UTC月份</label><select id="dMonth"></select>
+      <label>生成延迟ms/批(慢生成演示)</label><input id="dSleep" type="number" value="0" style="width:80px">
+      <label>故障注入</label>
+      <select id="dFail"><option value="">无</option><option value="generating">generating</option></select>
+      <button id="dSubmit">提交受理</button>
+      <span class="dim">受理成功前已同事务固定该月同一时点完整观测；同号同月复用，换月拒绝</span>
+    </div>
+    <div class="row">
+      <button class="danger" onclick="crashDemo()">退出重启演示：立即硬退出进程</button>
+      <span class="dim">生成中崩溃后重启应用（docker compose 会自动重启），将从原固定快照续跑，不重读现行观测</span>
+    </div>
+    <table id="deliveries">
+      <thead><tr>
+        <th>交付单号</th><th>月份</th><th>状态</th><th>生成进度</th><th>行数</th>
+        <th>SHA-256</th><th>字节</th><th>固定时点(UTC)</th><th>错误</th><th>操作</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
   <!-- 日志 -->
   <section class="card wide">
     <h2>运行日志</h2>
@@ -183,7 +208,7 @@ async function refresh() {
 }
 
 function syncSelects(months) {
-  for (const id of ['mMonth','wMonth','qMonth','vMonth']) {
+  for (const id of ['mMonth','wMonth','qMonth','vMonth','dMonth']) {
     const el = document.getElementById(id);
     const cur = el.value;
     if (el.dataset.sig === months.join(',')) continue;
@@ -267,6 +292,78 @@ async function doVerify() {
     `结论: <span class="${cls}">${r.consistent ? '一致 ✓' : '不一致 ✗'}</span>`;
 }
 
+// ---------------------------------------------------------------- 观测交付
+function dTag(status, running) {
+  if (status === 'ready') return '<span class="tag done">ready 可下载</span>';
+  if (status === 'failed') return '<span class="tag fail">failed 可重试</span>';
+  if (status === 'generating')
+    return `<span class="tag ${running ? 'run' : 'fail'}">generating${running ? '…' : '（中断，重启自动续跑）'}</span>`;
+  return `<span class="tag ${running ? 'run' : 'idle'}">frozen 待生成</span>`;
+}
+
+async function refreshDeliveries() {
+  let r;
+  try { r = await api('/api/deliveries'); } catch (e) { return; }
+  const running = new Set(r.running || []);
+  const tb = document.querySelector('#deliveries tbody');
+  tb.innerHTML = '';
+  for (const d of r.deliveries) {
+    const tr = document.createElement('tr');
+    const sha = d.csv_sha256
+      ? `<span title="${d.csv_sha256}">${d.csv_sha256.slice(0, 16)}…</span>` : '—';
+    const prog = d.status === 'ready' ? '—'
+      : `${d.generated_rows ?? 0} / ${d.row_count ?? 0}`;
+    const canRetry = d.status === 'failed' ||
+      ((d.status === 'frozen' || d.status === 'generating') && !running.has(d.delivery_no));
+    const canDl = d.status === 'ready';
+    tr.innerHTML = `
+      <td class="mono">${d.delivery_no}</td>
+      <td class="mono">${d.month}</td>
+      <td>${dTag(d.status, running.has(d.delivery_no))}</td>
+      <td>${prog}</td>
+      <td>${d.csv_rows ?? d.row_count ?? '—'}</td>
+      <td class="mono" style="font-size:12px">${sha}</td>
+      <td>${d.csv_bytes ?? '—'}</td>
+      <td class="mono" style="font-size:12px">${d.frozen_at || '—'}</td>
+      <td style="font-size:12px;color:var(--bad)">${d.error || ''}</td>
+      <td>
+        <button class="ghost" ${canRetry ? '' : 'disabled'}
+          onclick="retryDelivery('${d.delivery_no}')">重试</button>
+        <button ${canDl ? '' : 'disabled'}
+          onclick="location.href='/api/deliveries/${encodeURIComponent(d.delivery_no)}/download'">下载CSV</button>
+      </td>`;
+    tb.appendChild(tr);
+  }
+}
+
+async function submitDelivery() {
+  const body = {
+    delivery_no: document.getElementById('dNo').value.trim(),
+    month: document.getElementById('dMonth').value,
+    sleep_ms: +document.getElementById('dSleep').value,
+    fail_at: document.getElementById('dFail').value || null,
+  };
+  try {
+    const r = await api('/api/deliveries', {method:'POST', body: JSON.stringify(body)});
+    alert((r.reused ? '同号同月：已复用原固定快照。' : '受理成功：快照已固定。') +
+      `\n状态 ${r.status}，快照行数 ${r.row_count}`);
+  } catch (e) { alert('受理失败：' + e.message); }
+  refreshDeliveries();
+}
+
+async function retryDelivery(no) {
+  try { await api(`/api/deliveries/${encodeURIComponent(no)}/retry`, {method:'POST'}); }
+  catch (e) { alert('重试失败：' + e.message); }
+  refreshDeliveries();
+}
+
+async function crashDemo() {
+  if (!confirm('立即让应用进程硬退出（os._exit，模拟宕机）？\n' +
+    'docker compose 下容器会自动重启；本地请重新启动应用。\n' +
+    '重启后未完成的交付将从原固定快照续跑。')) return;
+  try { await api('/api/debug/crash', {method:'POST'}); } catch (e) {}
+}
+
 async function pollLog() {
   try {
     const r = await api('/api/logs?since=' + logSeq);
@@ -283,13 +380,16 @@ async function pollLog() {
 
 document.getElementById('mStart').onclick = startMigration;
 document.getElementById('wAuto').onclick = toggleAuto;
+document.getElementById('dSubmit').onclick = submitDelivery;
 document.getElementById('qAuto').onchange = e => {
   if (e.target.checked) doQuery();
 };
 setInterval(refresh, 1000);
+setInterval(refreshDeliveries, 1000);
 setInterval(pollLog, 1000);
 setInterval(() => { if (document.getElementById('qAuto').checked) doQuery(); }, 1000);
 refresh();
+refreshDeliveries();
 </script>
 </body>
 </html>

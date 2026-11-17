@@ -79,3 +79,25 @@ def ensure_meta_tables():
             "CREATE INDEX IF NOT EXISTS migration_delta_month_seq "
             "ON migration_delta (month, seq)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS deliveries (
+                delivery_no     text        PRIMARY KEY,
+                month           date        NOT NULL,
+                status          text        NOT NULL DEFAULT 'frozen'
+                                CHECK (status IN ('frozen','generating','ready','failed')),
+                snapshot_table  text        NOT NULL,
+                row_count       bigint      NOT NULL DEFAULT 0,
+                generated_rows  bigint      NOT NULL DEFAULT 0,
+                csv_rows        bigint,
+                csv_sha256      text,
+                csv_bytes       bigint,
+                file_path       text,
+                sleep_ms        integer     NOT NULL DEFAULT 0,
+                frozen_at       timestamptz NOT NULL DEFAULT now(),
+                error           text,
+                updated_at      timestamptz NOT NULL DEFAULT now(),
+                created_at      timestamptz NOT NULL DEFAULT now()
+            )
+            """
+        )

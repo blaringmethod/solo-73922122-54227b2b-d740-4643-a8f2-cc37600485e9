@@ -219,13 +219,18 @@ class MigrationWorker(threading.Thread):
         self._log(f"影子表 {p} 就绪，增量触发器已挂载，本月默认分区约 {total} 行")
 
     def stage_wait_old_xacts(self, conn, t0):
-        """等待 t0 之前开启且持有写事务号的老事务结束，避免它们逃过触发器。"""
+        """等待 t0 之前开启且持有写事务号的老事务结束，避免它们逃过触发器。
+
+        只统计本库事务：触发器装在本库的 observations_default 上，
+        其他数据库的事务不可能逃过它（共享集群下避免被无关长事务阻塞）。
+        """
         _set_status(conn, self.month, ST_WAITING)
         deadline = time.monotonic() + 120
         while True:
             n = conn.execute(
                 "SELECT count(*) FROM pg_stat_activity "
-                "WHERE backend_xid IS NOT NULL AND xact_start < %s",
+                "WHERE backend_xid IS NOT NULL AND xact_start < %s"
+                "  AND datname = current_database()",
                 (t0,),
             ).fetchone()[0]
             if n == 0:
